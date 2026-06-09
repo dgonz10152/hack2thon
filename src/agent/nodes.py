@@ -4,7 +4,7 @@ import os
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 
 from agent.model import model
 from agent.prompts import (
@@ -102,3 +102,14 @@ def compile_bias_node(state: AgentState) -> AgentStateUpdate:
         ]
     )
     return {"judge_bias": result.content}
+
+
+def review_bias_node(state: AgentState) -> AgentStateUpdate:
+    draft = state.get("judge_bias", "")
+    approved = interrupt(
+        {
+            "draft_bias": draft,
+            "instructions": "Edit the analysis or return it unchanged to approve.",
+        }
+    )
+    return {"judge_bias": approved}
