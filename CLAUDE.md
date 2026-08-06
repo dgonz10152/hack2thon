@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repo.
 
 ## Project
 
-Multi-agent system built on LangGraph that analyzes a DevPost hackathon page end-to-end: fetches the page, extracts theme + judges, fans out a research agent per judge (DuckDuckGo via `search_web`), and synthesizes a panel-wide bias analysis. From the approved bias it then brainstorms a pool of app ideas, ranks the top 20, fans out a research agent per idea (feasibility, similar projects, past-winner "winning formula"), compiles 20 fully fleshed-out ideas, and interrupts for the user to pick one or write their own.
+Multi-agent system built on LangGraph that analyzes a DevPost hackathon page end-to-end: fetches the page, extracts theme + judges, fans out a research agent per judge (DuckDuckGo via `search_web`), and synthesizes a panel-wide bias analysis. From the approved bias it then brainstorms a pool of app ideas, ranks the top 20, fans out a research agent per idea (feasibility, similar projects, past-winner "winning formula"), compiles 20 fully fleshed-out ideas, and interrupts for the user to pick one or write their own. Finally it decomposes the chosen idea into an ordered build plan and drives one `opencode` coding sub-agent per task to actually build the app in a directory the user names.
 
 ## Layout
 
@@ -25,11 +25,14 @@ fetch_html ─┬─► extract_theme ──────────────
                                                                                           ▼
   select_idea ◄─ compile_ideas ◄─ research_one_idea (×20) ◄─ rank_ideas ◄─ generate_idea_candidates
        │
-       ▼  END
+       ▼
+  plan_build ─► choose_build_dir ─► build_app ─► END
 ```
 `research_judges_orchestrator` and `research_ideas_orchestrator` are conditional-edge dispatchers (not nodes) that return one `Send("research_one_judge"/"research_one_idea", ...)` per judge/idea. `review_bias` and `select_idea` are `interrupt()` (human-in-the-loop) nodes.
 
 Idea flow: `generate_idea_candidates` brainstorms ~40 ideas from the approved bias + synopsis, `rank_ideas` selects the top 20 (one LLM call, no web search) and seeds them into the `ideas` fan-out field, each `research_one_idea` worker enriches one idea with web research, `compile_ideas` turns the 20 into fully fleshed-out `FinalIdea`s, and `select_idea` interrupts for the user to pick one or supply their own.
+
+Build flow (**sequential, not a fan-out**): `plan_build` is the master agent, turning the selected idea into a `BuildPlan` of ordered `BuildTask`s. `choose_build_dir` interrupts for an absolute path, validates it, and `git init`s it. `build_app` then runs one `opencode` subprocess sub-agent per task, in order, committing after each. It is sequential because task N+1 reads the files task N wrote, so parallel agents in one directory would clobber each other.
 
 ## Conventions
 
@@ -45,6 +48,7 @@ Idea flow: `generate_idea_candidates` brainstorms ~40 ideas from the approved bi
 uv sync                    # install / update deps
 uv run langgraph dev       # local LangGraph dev server
 uv run python -c "from agent.graph import graph; print(list(graph.get_graph().nodes.keys()))"  # quick smoke test
+uv run python tests/test_build_app.py   # build-phase self-check (hermetic, no model calls)
 ```
 
 ## Environment
@@ -53,11 +57,15 @@ uv run python -c "from agent.graph import graph; print(list(graph.get_graph().no
 - `OLLAMA_MODEL` — e.g. `gpt-oss:120b-cloud`
 - `JUDGE_RESEARCH_CONCURRENCY` — throttle for parallel judge research
 - `IDEA_RESEARCH_CONCURRENCY` — throttle for parallel idea research (up to 20 ideas)
+- `BUILD_MODEL` — `provider/model` for the coding sub-agents, default `ollama/minimax-m3`
+- `BUILD_TASK_TIMEOUT` — per-task wall-clock limit in seconds, default 900
 - `LANGSMITH_*` — tracing
 
 ## Gotchas
 
 - The `Judge.online_summary` and `Idea.research` fields default to `""`. Their reducers treat empty strings as "no update" so re-running enrichment is idempotent. `rank_ideas` seeds `ideas` with `research=""`, then each worker upserts the same title with a populated `research` — so `rank_ideas` must return idea titles **verbatim** (its prompt says so) or `merge_ideas` won't match the seed.
 - `compile_bias` joins both the judge-research branch and `extract_theme`. Both must complete before it fires — that's intentional (it needs the synopsis).
-- Two `interrupt()` nodes exist: `review_bias` then `select_idea`. Resuming a thread must target the right one (the bias review fires first).
+- Three `interrupt()` nodes exist, in order: `review_bias`, `select_idea`, then `choose_build_dir`. Resuming a thread must target the right one. `choose_build_dir` can interrupt repeatedly within a single node run (re-prompting on a bad path, or to confirm a non-empty directory), so do not assume one interrupt per node.
+- **A coding sub-agent can exit 0 having done nothing.** Observed with `ollama/minimax-m3`, which intermittently returns an empty response and writes no files. `build_app` therefore verifies each task against `git status --porcelain` rather than trusting the exit code, retries once, and fails the build if a task changes nothing twice. Do not "simplify" this to an exit-code check.
+- `opencode.json` at the repo root carries both the `ollama` provider and the `permission` block that lets sub-agents edit and run commands unattended. It is passed to sub-agents via `OPENCODE_CONFIG` because they run with `--dir` pointing at the user's build directory, where this repo's project config would not be discovered.
 - `ddgs` is listed as a separate dep alongside `duckduckgo-search`; `langchain-community`'s `DuckDuckGoSearchRun` may pick up either depending on version.
