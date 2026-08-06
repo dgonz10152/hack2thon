@@ -80,6 +80,28 @@ class FinalIdeas(BaseModel):
         return data
 
 
+class BuildTask(BaseModel):
+    title: str
+    description: str  # self-contained instructions for one coding-agent step
+    acceptance: str = ""  # short, checkable definition of done
+    status: str = ""  # "" | "ok" | "failed", filled in by build_app_node
+
+
+class BuildPlan(BaseModel):
+    project_summary: str
+    tech_stack: list[str]
+    setup_notes: str = ""  # scaffold/dir layout/run commands
+    tasks: list[BuildTask]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _unwrap_bare_list(cls, data):
+        # Some Ollama models return a bare task list instead of the full object.
+        if isinstance(data, list):
+            return {"project_summary": "", "tech_stack": [], "tasks": data}
+        return data
+
+
 def merge_ideas(left: list[Idea] | None, right: list[Idea] | None) -> list[Idea]:
     """Upsert ideas by title so parallel research branches can enrich them independently."""
     by_title: dict[str, Idea] = {}
@@ -103,11 +125,6 @@ class InputState(TypedDict):
     devpost_url: str
 
 
-class OpenCodeState(TypedDict):
-    prompts: str
-    responses: str
-
-
 class JudgeResearchState(TypedDict):
     judge: Judge
     hackathon_synposis: str
@@ -129,6 +146,10 @@ class AgentState(InputState, total=False):
     ideas: Annotated[list[Idea], merge_ideas]
     final_ideas: list[FinalIdea]
     selected_idea: str
+    build_plan: BuildPlan
+    build_tasks: list[BuildTask]
+    build_dir: str
+    build_result: str
 
 
 class AgentStateUpdate(TypedDict, total=False):
@@ -142,3 +163,7 @@ class AgentStateUpdate(TypedDict, total=False):
     ideas: list[Idea]
     final_ideas: list[FinalIdea]
     selected_idea: str
+    build_plan: BuildPlan
+    build_tasks: list[BuildTask]
+    build_dir: str
+    build_result: str
