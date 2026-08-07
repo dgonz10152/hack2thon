@@ -386,6 +386,15 @@ def _task_prompt(
     return "\n\n".join(parts)
 
 
+def _say(message: str) -> None:
+    """Progress output for the build phase.
+
+    The build is the one phase that runs for minutes with nothing to show in
+    state until it finishes, so it streams to the console as it goes.
+    """
+    print(message, flush=True)
+
+
 def _has_changes(build_dir: str) -> bool:
     """True if the sub-agent actually touched the working tree."""
     return bool(_git(build_dir, "status", "--porcelain").stdout.strip())
@@ -410,13 +419,24 @@ async def _run_sub_agent(
         stderr=asyncio.subprocess.STDOUT,
         env=env,
     )
+
+    # Collected outside the pump so partial output survives a timeout kill.
+    lines: list[str] = []
+
+    async def pump() -> None:
+        async for raw in proc.stdout:
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            _say(f"  | {line}")
+            lines.append(line)
+        await proc.wait()
+
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        await asyncio.wait_for(pump(), timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        return "timeout", ""
-    output = (stdout or b"").decode("utf-8", errors="replace")
+        return "timeout", "\n".join(lines)
+    output = "\n".join(lines)
     if proc.returncode != 0:
         return f"exit:{proc.returncode}", output
     return "ok", output
@@ -446,14 +466,22 @@ async def build_app_node(state: AgentState) -> AgentStateUpdate:
     timeout = int(os.getenv("BUILD_TASK_TIMEOUT", "900"))
     env = {**os.environ, "OPENCODE_CONFIG": str(_OPENCODE_CONFIG)}
 
+    total = len(tasks)
+    _say(f"\n=== Building in {build_dir} ===")
+    _say(f"{plan.project_summary}")
+    _say(f"Stack: {', '.join(plan.tech_stack)}")
+    _say(f"{total} tasks, model {model_id}, {timeout}s per task\n")
+
     log: list[str] = []
     done: list[str] = []
     for n, task in enumerate(tasks, start=1):
-        prompt = _task_prompt(plan, task, n, len(tasks), done)
+        prompt = _task_prompt(plan, task, n, total, done)
+        _say(f"--- [{n}/{total}] {task.title} ---")
         outcome, output = await _run_sub_agent(
             prompt, build_dir, model_id, timeout, env
         )
         if outcome == "ok" and not _has_changes(build_dir):
+            _say(f"[{n}/{total}] no files changed, retrying once")
             log.append(f"{n}. {task.title} - no changes on first try, retrying")
             outcome, output = await _run_sub_agent(
                 prompt, build_dir, model_id, timeout, env
@@ -468,6 +496,8 @@ async def build_app_node(state: AgentState) -> AgentStateUpdate:
                 "no-op": "sub-agent made no file changes (twice)",
             }.get(outcome, f"FAILED ({outcome})")
             log.append(f"{n}. {task.title} - {reason}")
+            _say(f"[{n}/{total}] {reason}")
+            _say(f"=== Build stopped at task {n}. Output left in {build_dir} ===\n")
             return {
                 "build_tasks": tasks,
                 "build_result": _build_summary(
@@ -480,7 +510,10 @@ async def build_app_node(state: AgentState) -> AgentStateUpdate:
         log.append(f"{n}. {task.title} - ok")
         _git(build_dir, "add", "-A")
         _git(build_dir, "commit", "-q", "-m", f"task {n}: {task.title}")
+        changed = _git(build_dir, "show", "--stat", "--format=", "HEAD").stdout.strip()
+        _say(f"[{n}/{total}] done, committed:\n{changed}\n")
 
+    _say(f"=== Build finished. {total} tasks, output in {build_dir} ===\n")
     return {"build_tasks": tasks, "build_result": _build_summary(build_dir, log)}
 
 
