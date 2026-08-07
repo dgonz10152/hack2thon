@@ -40,6 +40,8 @@ Task N+1 reads the files task N wrote, so parallel coding agents in one director
 Coding sub-agents run through the [opencode](https://opencode.ai) CLI, configured in `opencode.json` to use the same Ollama credential as the rest of the pipeline.
 A sub-agent that exits successfully without changing any files is treated as a failure, not a success, and retried once.
 
+The build streams each sub-agent's output to the console as it happens - tool calls, file writes, diffs, and shell commands - with a `[n/N]` header and a commit diffstat per task, so a run that takes minutes is not a silent wait.
+
 ## Setup
 
 ```bash

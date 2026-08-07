@@ -26,23 +26,42 @@ PLAN = BuildPlan(
 )
 
 
+class FakeStdout:
+    """Async-iterable stand-in for proc.stdout, which build_app_node streams."""
+
+    def __init__(self, lines, hang=False):
+        self._lines = list(lines)
+        self._hang = hang
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._hang:
+            await asyncio.sleep(3600)
+        if not self._lines:
+            raise StopAsyncIteration
+        return self._lines.pop(0)
+
+
 class FakeProc:
     def __init__(self, returncode=0, output=b"done", hang=False):
         self.returncode = returncode
-        self._output = output
-        self._hang = hang
+        self.stdout = FakeStdout([output] if output else [], hang=hang)
         self.killed = False
-
-    async def communicate(self):
-        if self._hang:
-            await asyncio.sleep(3600)
-        return self._output, None
 
     def kill(self):
         self.killed = True
 
     async def wait(self):
         return self.returncode
+
+
+class FakeGit:
+    """subprocess.CompletedProcess stand-in; _git callers read .stdout."""
+
+    def __init__(self, stdout=""):
+        self.stdout = stdout
 
 
 def _install_fakes(procs, changes=None):
@@ -59,7 +78,12 @@ def _install_fakes(procs, changes=None):
         return made.pop(0)
 
     nodes.asyncio.create_subprocess_exec = fake_exec
-    nodes._git = lambda d, *a: gits.append(a)
+
+    def fake_git(d, *a):
+        gits.append(a)
+        return FakeGit(" main.py | 2 +-" if a[:1] == ("show",) else "")
+
+    nodes._git = fake_git
     nodes._has_changes = lambda d: scripted.pop(0) if scripted else True
     nodes.shutil.which = lambda _: "/usr/bin/opencode"
     return calls, gits
