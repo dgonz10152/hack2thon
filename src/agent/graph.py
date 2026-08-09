@@ -22,7 +22,9 @@ from agent.nodes import (
 from agent.state import AgentState, InputState
 
 
-def build_graph() -> CompiledStateGraph:
+def build_graph(checkpointer=None) -> CompiledStateGraph:
+    """Wire the graph. Pass a checkpointer to run it outside `langgraph dev`,
+    which supplies its own; without one, `interrupt()` cannot resume."""
     g = StateGraph(AgentState, input=InputState)
     g.add_node("fetch_html", fetch_html_node)
     g.add_node("extract_judges", extract_judges_node)
@@ -40,13 +42,19 @@ def build_graph() -> CompiledStateGraph:
     g.add_node("build_app", build_app_node)
 
     g.add_edge(START, "fetch_html")
-    g.add_edge("fetch_html", "extract_judges")
+    # extract_theme runs before extract_judges rather than beside it. Two
+    # branches into compile_bias is NOT a barrier join: they finish at different
+    # depths, so compile_bias fired once per branch, writing judge_bias
+    # concurrently (InvalidUpdateError) and running once on judges that had not
+    # been researched yet. One incoming edge means it fires exactly once, after
+    # every Send worker. It also guarantees the orchestrator below has the
+    # synopsis it hands to each worker.
     g.add_edge("fetch_html", "extract_theme")
+    g.add_edge("extract_theme", "extract_judges")
     g.add_conditional_edges(
         "extract_judges", research_judges_orchestrator, ["research_one_judge"]
     )
     g.add_edge("research_one_judge", "compile_bias")
-    g.add_edge("extract_theme", "compile_bias")
     g.add_edge("compile_bias", "review_bias")
     g.add_edge("review_bias", "generate_idea_candidates")
     g.add_edge("generate_idea_candidates", "rank_ideas")
@@ -59,7 +67,7 @@ def build_graph() -> CompiledStateGraph:
     g.add_edge("plan_build", "choose_build_dir")
     g.add_edge("choose_build_dir", "build_app")
     g.add_edge("build_app", END)
-    return g.compile()
+    return g.compile(checkpointer=checkpointer)
 
 
 graph = build_graph()
