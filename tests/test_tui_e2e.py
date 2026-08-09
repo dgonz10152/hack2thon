@@ -1,7 +1,7 @@
 """End-to-end test: the real pipeline through the real TUI, with dummy data.
 
 Hermetic - no Ollama, no DuckDuckGo, no opencode, no network. Stubs are placed
-at the *model* boundary (the nine model-bound names in agent.nodes), not at the
+at the *model* boundary (the model-bound names in agent.nodes.*), not at the
 node boundary, so every real node body still runs: BeautifulSoup parsing, prompt
 assembly, the merge_judges/merge_ideas reducers, _resolve_selected_idea, the
 choose_build_dir validation loop, and the build loop.
@@ -16,8 +16,10 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage
 
-from agent import nodes, tui
+from agent import progress, tui
+from agent.nodes import build, common, ideas, judges
 from agent.prompts import BIAS_COMPILER_SYSTEM, THEME_EXTRACTOR_SYSTEM
+from agent.tui import app as tui_app
 from agent.state import (
     BuildPlan,
     BuildTask,
@@ -130,26 +132,28 @@ class FakeProc:
 
 def install_stubs() -> dict:
     """Patch the model boundary. Returns the originals for restoration."""
-    names = [
-        "fetch_html",
-        "chat",
-        "judge_extractor",
-        "judge_researcher",
-        "idea_generator",
-        "idea_ranker",
-        "idea_compiler",
-        "build_planner",
-        "idea_researcher",
-        "_git",
-        "_has_changes",
-    ]
-    original = {n: getattr(nodes, n) for n in names}
-    original["create_subprocess_exec"] = asyncio.create_subprocess_exec
-    original["which"] = shutil.which
+    # Each stub goes on the module the code lives in: node functions read the
+    # globals of their own module, so patching the package would do nothing.
+    homes = {
+        "fetch_html": judges,
+        "chat": judges,
+        "judge_extractor": judges,
+        "judge_researcher": judges,
+        "idea_generator": ideas,
+        "idea_ranker": ideas,
+        "idea_compiler": ideas,
+        "idea_researcher": ideas,
+        "build_planner": build,
+        "_git": build,
+        "_has_changes": build,
+    }
+    original = {name: (mod, getattr(mod, name)) for name, mod in homes.items()}
+    original["create_subprocess_exec"] = (asyncio, asyncio.create_subprocess_exec)
+    original["which"] = (shutil, shutil.which)
 
-    nodes.fetch_html = FakeTool(DUMMY_HTML)
-    nodes.chat = FakeModel()  # the retrying wrapper the nodes actually call
-    nodes.judge_extractor = FakeStructured(
+    judges.fetch_html = FakeTool(DUMMY_HTML)
+    judges.chat = FakeModel()  # the retrying wrapper the nodes actually call
+    judges.judge_extractor = FakeStructured(
         Judges(
             judges=[
                 Judge(name="Ada Lovelace", blurb="analytical engine"),
@@ -157,10 +161,10 @@ def install_stubs() -> dict:
             ]
         )
     )
-    nodes.judge_researcher = FakeReactAgent(
+    judges.judge_researcher = FakeReactAgent(
         "Researched profile.", record_key="judge_prompts"
     )
-    nodes.idea_generator = FakeStructured(
+    ideas.idea_generator = FakeStructured(
         IdeaCandidates(
             ideas=[Idea(title=t, pitch=f"pitch {t}") for t in CANDIDATE_TITLES]
         )
@@ -170,11 +174,11 @@ def install_stubs() -> dict:
     # out from whatever rank_ideas returned and each worker model_copy's that
     # object, so seed and update always share a title. What the merge assertion
     # below actually catches is research failing to land at all.
-    nodes.idea_ranker = FakeStructured(
+    ideas.idea_ranker = FakeStructured(
         IdeaCandidates(ideas=[Idea(title=t, pitch=f"pitch {t}") for t in RANKED_TITLES])
     )
-    nodes.idea_researcher = FakeReactAgent("Feasible. No close prior art.")
-    nodes.idea_compiler = FakeStructured(
+    ideas.idea_researcher = FakeReactAgent("Feasible. No close prior art.")
+    ideas.idea_compiler = FakeStructured(
         FinalIdeas(
             ideas=[
                 FinalIdea(
@@ -193,7 +197,7 @@ def install_stubs() -> dict:
         ),
         record_key="compiler_prompt",
     )
-    nodes.build_planner = FakeStructured(
+    build.build_planner = FakeStructured(
         BuildPlan(
             project_summary="A dummy app.",
             tech_stack=["python"],
@@ -217,23 +221,21 @@ def install_stubs() -> dict:
 
         return R()
 
-    nodes._git = fake_git
-    nodes._has_changes = lambda _dir: True
+    build._git = fake_git
+    build._has_changes = lambda _dir: True
     SEEN["commits"] = commits
 
     async def fake_exec(*_args, **_kwargs):
         return FakeProc()
 
-    nodes.asyncio.create_subprocess_exec = fake_exec
-    nodes.shutil.which = lambda _: "/usr/bin/opencode"
+    asyncio.create_subprocess_exec = fake_exec
+    shutil.which = lambda _: "/usr/bin/opencode"
     return original
 
 
 def restore(original: dict) -> None:
-    asyncio.create_subprocess_exec = original.pop("create_subprocess_exec")
-    shutil.which = original.pop("which")
-    for name, value in original.items():
-        setattr(nodes, name, value)
+    for name, (module, value) in original.items():
+        setattr(module, name, value)
 
 
 # --------------------------------------------------------------------------
@@ -330,16 +332,16 @@ async def _run(tmp: Path):
 async def _final_state(app):
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-    async with AsyncSqliteSaver.from_conn_string(tui.DB_PATH) as saver:
-        graph = tui.build_graph(saver)
+    async with AsyncSqliteSaver.from_conn_string(tui_app.DB_PATH) as saver:
+        graph = tui_app.build_graph(saver)
         snapshot = await graph.aget_state({"configurable": {"thread_id": "e2e"}})
         return snapshot.values
 
 
 def test_full_pipeline_through_the_tui():
     tmp = Path(tempfile.mkdtemp())
-    original_db = tui.DB_PATH
-    tui.DB_PATH = str(tmp / "e2e.db")
+    original_db = tui_app.DB_PATH
+    tui_app.DB_PATH = str(tmp / "e2e.db")
     SEEN.clear()
     # install_stubs must be called exactly once: a second call would capture the
     # stubs as the "originals" and restore() would leave agent.nodes patched.
@@ -348,7 +350,7 @@ def test_full_pipeline_through_the_tui():
         text, state, phases, build_dir = asyncio.run(_run(tmp))
     finally:
         restore(original)
-        tui.DB_PATH = original_db
+        tui_app.DB_PATH = original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
     # run_pipeline logs failures instead of raising, so check this FIRST or a
@@ -475,15 +477,15 @@ async def _resume_scenario():
 def test_resume_restores_visible_progress():
     """Resume worked, but showed an empty sidebar and log, so it looked broken."""
     tmp = Path(tempfile.mkdtemp())
-    original_db = tui.DB_PATH
-    tui.DB_PATH = str(tmp / "resume.db")
+    original_db = tui_app.DB_PATH
+    tui_app.DB_PATH = str(tmp / "resume.db")
     SEEN.clear()
     original = install_stubs()
     try:
         phases, text, url, unknown = asyncio.run(_resume_scenario())
     finally:
         restore(original)
-        tui.DB_PATH = original_db
+        tui_app.DB_PATH = original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
     assert "Pipeline failed" not in text, text
@@ -523,8 +525,8 @@ async def _ls_scenario(tmp: Path):
             await wait_for_screen(pilot.app, tui.BiasScreen)
             pilot.app.exit()
 
-    async with AsyncSqliteSaver.from_conn_string(tui.DB_PATH) as saver:
-        graph = tui.build_graph(saver)
+    async with AsyncSqliteSaver.from_conn_string(tui_app.DB_PATH) as saver:
+        graph = tui_app.build_graph(saver)
         rows = await tui.list_threads(saver, graph)
         # One unreadable thread must not take out the listing.
         degraded = await tui.list_threads(saver, _ExplodingGraph(graph, "run-two"))
@@ -545,15 +547,15 @@ async def _ls_scenario(tmp: Path):
 
 def test_ls_lists_and_resumes_previous_runs():
     tmp = Path(tempfile.mkdtemp())
-    original_db = tui.DB_PATH
-    tui.DB_PATH = str(tmp / "ls.db")
+    original_db = tui_app.DB_PATH
+    tui_app.DB_PATH = str(tmp / "ls.db")
     SEEN.clear()
     original = install_stubs()
     try:
         rows, degraded, listed, chosen, text = asyncio.run(_ls_scenario(tmp))
     finally:
         restore(original)
-        tui.DB_PATH = original_db
+        tui_app.DB_PATH = original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
     ids = [r["thread_id"] for r in rows]
@@ -603,21 +605,21 @@ async def _skip_scenario():
 def test_skip_button_unsticks_a_hung_research_phase():
     """`s` must rescue a phase that is hung, not merely one that is erroring."""
     tmp = Path(tempfile.mkdtemp())
-    original_db, tui.DB_PATH = tui.DB_PATH, str(tmp / "skip.db")
+    original_db, tui_app.DB_PATH = tui_app.DB_PATH, str(tmp / "skip.db")
     SEEN.clear()
     original = install_stubs()
-    original_agent = nodes.idea_researcher
-    original_timeout = nodes._RESEARCH_TIMEOUT
-    nodes.idea_researcher = _NeverReturns()
-    nodes._RESEARCH_TIMEOUT = 3600  # long enough that only the key can help
+    original_agent = ideas.idea_researcher
+    original_timeout = common.RESEARCH_TIMEOUT
+    ideas.idea_researcher = _NeverReturns()
+    common.RESEARCH_TIMEOUT = 3600  # long enough that only the key can help
     try:
         stuck_screen, text = asyncio.run(_skip_scenario())
     finally:
-        nodes.idea_researcher = original_agent
-        nodes._RESEARCH_TIMEOUT = original_timeout
-        nodes.clear_skip()
+        ideas.idea_researcher = original_agent
+        common.RESEARCH_TIMEOUT = original_timeout
+        progress.clear_skip()
         restore(original)
-        tui.DB_PATH = original_db
+        tui_app.DB_PATH = original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
     assert stuck_screen == "Screen", f"should have been mid-run, not {stuck_screen}"
@@ -632,8 +634,8 @@ def test_skip_button_unsticks_a_hung_research_phase():
 
 def test_ls_with_no_previous_runs():
     tmp = Path(tempfile.mkdtemp())
-    original_db = tui.DB_PATH
-    tui.DB_PATH = str(tmp / "empty.db")
+    original_db = tui_app.DB_PATH
+    tui_app.DB_PATH = str(tmp / "empty.db")
     original = install_stubs()
 
     async def run():
@@ -646,7 +648,7 @@ def test_ls_with_no_previous_runs():
         text = asyncio.run(run())
     finally:
         restore(original)
-        tui.DB_PATH = original_db
+        tui_app.DB_PATH = original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
     assert "No previous runs" in text, text

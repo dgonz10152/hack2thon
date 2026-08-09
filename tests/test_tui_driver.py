@@ -19,7 +19,8 @@ from langgraph.types import Command, interrupt
 from textual import work
 from textual.app import App
 
-from agent import nodes, tui
+from agent import progress, tui
+from agent.tui import app as tui_app
 from agent.tui import (
     BiasScreen,
     ConfirmScreen,
@@ -156,12 +157,12 @@ def test_idea_screen_parses_options():
 
 def test_say_sink_redirects_and_restores():
     captured = []
-    nodes.set_say_sink(captured.append)
-    nodes._say("hello")
+    progress.set_say_sink(captured.append)
+    progress._say("hello")
     assert captured == ["hello"], captured
 
-    nodes.set_say_sink(None)
-    assert nodes._say_sink is None, "None must restore printing for the CLI path"
+    progress.set_say_sink(None)
+    assert progress._say_sink is None, "None must restore printing for the CLI path"
     print("ok: _say redirects to the TUI and restores the default")
 
 
@@ -252,10 +253,10 @@ def test_app_survives_a_failing_node():
         g.add_edge("fetch_html", END)
         return g.compile(checkpointer=checkpointer)
 
-    original_build, original_db = tui.build_graph, tui.DB_PATH
+    original_build, original_db = tui_app.build_graph, tui_app.DB_PATH
     tmp = tempfile.mkdtemp()
-    tui.build_graph = stub
-    tui.DB_PATH = str(Path(tmp) / "t.db")
+    tui_app.build_graph = stub
+    tui_app.DB_PATH = str(Path(tmp) / "t.db")
 
     async def run():
         app = tui.HackathonApp(url="https://x.devpost.com", thread_id="fail1")
@@ -270,7 +271,7 @@ def test_app_survives_a_failing_node():
     try:
         text = asyncio.run(run())
     finally:
-        tui.build_graph, tui.DB_PATH = original_build, original_db
+        tui_app.build_graph, tui_app.DB_PATH = original_build, original_db
         shutil.rmtree(tmp, ignore_errors=True)
 
     assert "ollama unreachable" in text, text
@@ -292,5 +293,5 @@ if __name__ == "__main__":
         ):
             case()
     finally:
-        nodes.set_say_sink(None)
+        progress.set_say_sink(None)
     print("\nAll TUI driver checks passed.")

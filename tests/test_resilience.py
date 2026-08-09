@@ -16,7 +16,9 @@ import asyncio
 import httpx
 from langchain_core.runnables import RunnableLambda
 
-from agent import nodes
+from agent import progress
+from agent.model import TRANSIENT_ERRORS, resilient
+from agent.nodes import common, ideas, judges
 from agent.state import Idea, Judge
 
 
@@ -30,7 +32,7 @@ def test_transient_errors_are_retried():
             raise httpx.ReadError("")  # empty message, exactly as seen
         return "recovered"
 
-    result = nodes._resilient(RunnableLambda(flaky)).invoke({})
+    result = resilient(RunnableLambda(flaky)).invoke({})
     assert result == "recovered", result
     assert len(attempts) == 3, f"expected 2 retries then success, got {attempts}"
     print("ok: a transient ReadError is retried and can recover")
@@ -46,7 +48,7 @@ def test_every_transport_error_is_covered():
         httpx.RemoteProtocolError,
         httpx.PoolTimeout,
     ):
-        assert issubclass(exc_type, nodes._TRANSIENT), exc_type
+        assert issubclass(exc_type, TRANSIENT_ERRORS), exc_type
     print("ok: all httpx transport failures count as transient")
 
 
@@ -59,7 +61,7 @@ def test_non_transient_errors_are_not_retried():
         raise ValueError("this is a bug, not a blip")
 
     try:
-        nodes._resilient(RunnableLambda(broken)).invoke({})
+        resilient(RunnableLambda(broken)).invoke({})
     except ValueError:
         assert len(attempts) == 1, f"a ValueError must not be retried: {attempts}"
         print("ok: non-transient errors fail fast")
@@ -76,13 +78,13 @@ class _AlwaysFails:
 
 
 def test_one_failed_judge_does_not_kill_the_run():
-    original = nodes.judge_researcher
+    original = judges.judge_researcher
     said: list[str] = []
-    nodes.set_say_sink(said.append)
-    nodes.judge_researcher = _AlwaysFails(httpx.ReadError(""))
+    progress.set_say_sink(said.append)
+    judges.judge_researcher = _AlwaysFails(httpx.ReadError(""))
     try:
         out = asyncio.run(
-            nodes.research_one_judge_node(
+            judges.research_one_judge_node(
                 {
                     "judge": Judge(name="Ada", blurb="b"),
                     "hackathon_synopsis": "syn",
@@ -90,8 +92,8 @@ def test_one_failed_judge_does_not_kill_the_run():
             )
         )
     finally:
-        nodes.judge_researcher = original
-        nodes.set_say_sink(None)
+        judges.judge_researcher = original
+        progress.set_say_sink(None)
 
     judge = out["judges"][0]
     assert judge.name == "Ada", out
@@ -105,13 +107,13 @@ def test_one_failed_judge_does_not_kill_the_run():
 
 
 def test_one_failed_idea_does_not_kill_the_run():
-    original = nodes.idea_researcher
+    original = ideas.idea_researcher
     said: list[str] = []
-    nodes.set_say_sink(said.append)
-    nodes.idea_researcher = _AlwaysFails(httpx.ConnectError("boom"))
+    progress.set_say_sink(said.append)
+    ideas.idea_researcher = _AlwaysFails(httpx.ConnectError("boom"))
     try:
         out = asyncio.run(
-            nodes.research_one_idea_node(
+            ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="Idea 1", pitch="p"),
                     "hackathon_synopsis": "syn",
@@ -120,8 +122,8 @@ def test_one_failed_idea_does_not_kill_the_run():
             )
         )
     finally:
-        nodes.idea_researcher = original
-        nodes.set_say_sink(None)
+        ideas.idea_researcher = original
+        progress.set_say_sink(None)
 
     idea = out["ideas"][0]
     assert idea.title == "Idea 1", out
@@ -136,20 +138,20 @@ def test_single_nodes_still_propagate():
     This is the node that actually broke: a ReadError there means no ranking,
     and inventing one would be worse than stopping.
     """
-    original = nodes.idea_ranker
+    original = ideas.idea_ranker
 
     class Boom:
         def invoke(self, _messages):
             raise httpx.ReadError("")
 
-    nodes.idea_ranker = Boom()
+    ideas.idea_ranker = Boom()
     try:
-        nodes.rank_ideas_node({"idea_candidates": [], "judge_bias": "b"})
+        ideas.rank_ideas_node({"idea_candidates": [], "judge_bias": "b"})
     except httpx.ReadError:
         print("ok: rank_ideas still fails loudly, since there is nothing to degrade")
         return
     finally:
-        nodes.idea_ranker = original
+        ideas.idea_ranker = original
     raise AssertionError("rank_ideas should not silently continue")
 
 
@@ -166,12 +168,12 @@ class _CapturingAgent:
 
 def test_research_agents_get_a_raised_recursion_limit():
     """25 supersteps is ~12 tool calls, which real research can exceed."""
-    original = nodes.idea_researcher
+    original = ideas.idea_researcher
     agent = _CapturingAgent()
-    nodes.idea_researcher = agent
+    ideas.idea_researcher = agent
     try:
         asyncio.run(
-            nodes.research_one_idea_node(
+            ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="I", pitch="p"),
                     "hackathon_synopsis": "s",
@@ -180,7 +182,7 @@ def test_research_agents_get_a_raised_recursion_limit():
             )
         )
     finally:
-        nodes.idea_researcher = original
+        ideas.idea_researcher = original
 
     assert agent.config, "the research call must pass a config"
     limit = agent.config.get("recursion_limit")
@@ -193,16 +195,16 @@ def test_recursion_error_degrades_rather_than_aborting():
     from langgraph.errors import GraphRecursionError
 
     assert not issubclass(
-        GraphRecursionError, nodes._TRANSIENT
+        GraphRecursionError, TRANSIENT_ERRORS
     ), "a recursion loop is not transient; retrying it would waste three runs"
 
-    original = nodes.idea_researcher
+    original = ideas.idea_researcher
     said: list[str] = []
-    nodes.set_say_sink(said.append)
-    nodes.idea_researcher = _AlwaysFails(GraphRecursionError("limit of 25 reached"))
+    progress.set_say_sink(said.append)
+    ideas.idea_researcher = _AlwaysFails(GraphRecursionError("limit of 25 reached"))
     try:
         out = asyncio.run(
-            nodes.research_one_idea_node(
+            ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="The Unboxing", pitch="p"),
                     "hackathon_synopsis": "s",
@@ -211,8 +213,8 @@ def test_recursion_error_degrades_rather_than_aborting():
             )
         )
     finally:
-        nodes.idea_researcher = original
-        nodes.set_say_sink(None)
+        ideas.idea_researcher = original
+        progress.set_say_sink(None)
 
     idea = out["ideas"][0]
     assert idea.title == "The Unboxing", out
@@ -237,16 +239,16 @@ class _Hangs:
 
 def test_a_hung_worker_times_out():
     """Retries and degradation only fire on errors; silence needs a timeout."""
-    original_agent = nodes.idea_researcher
-    original_timeout = nodes._RESEARCH_TIMEOUT
+    original_agent = ideas.idea_researcher
+    original_timeout = common.RESEARCH_TIMEOUT
     agent = _Hangs()
-    nodes.idea_researcher = agent
-    nodes._RESEARCH_TIMEOUT = 0.3
+    ideas.idea_researcher = agent
+    common.RESEARCH_TIMEOUT = 0.3
     said: list[str] = []
-    nodes.set_say_sink(said.append)
+    progress.set_say_sink(said.append)
     try:
         out = asyncio.run(
-            nodes.research_one_idea_node(
+            ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="Stuck", pitch="p"),
                     "hackathon_synopsis": "s",
@@ -255,9 +257,9 @@ def test_a_hung_worker_times_out():
             )
         )
     finally:
-        nodes.idea_researcher = original_agent
-        nodes._RESEARCH_TIMEOUT = original_timeout
-        nodes.set_say_sink(None)
+        ideas.idea_researcher = original_agent
+        common.RESEARCH_TIMEOUT = original_timeout
+        progress.set_say_sink(None)
 
     assert agent.cancelled, "the hung call must actually be cancelled"
     assert "TimeoutError" in out["ideas"][0].research, out["ideas"][0].research
@@ -267,17 +269,17 @@ def test_a_hung_worker_times_out():
 
 def test_skip_abandons_in_flight_research():
     """The `s` binding must interrupt a call already in flight, not just queued."""
-    original_agent = nodes.idea_researcher
-    original_timeout = nodes._RESEARCH_TIMEOUT
+    original_agent = ideas.idea_researcher
+    original_timeout = common.RESEARCH_TIMEOUT
     agent = _Hangs()
-    nodes.idea_researcher = agent
-    nodes._RESEARCH_TIMEOUT = 3600  # long: only the skip can end this
+    ideas.idea_researcher = agent
+    common.RESEARCH_TIMEOUT = 3600  # long: only the skip can end this
     said: list[str] = []
-    nodes.set_say_sink(said.append)
+    progress.set_say_sink(said.append)
 
     async def scenario():
         task = asyncio.ensure_future(
-            nodes.research_one_idea_node(
+            ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="Slow", pitch="p"),
                     "hackathon_synopsis": "s",
@@ -286,16 +288,16 @@ def test_skip_abandons_in_flight_research():
             )
         )
         await asyncio.sleep(0.2)  # let it get in flight
-        nodes.request_skip()
+        progress.request_skip()
         return await asyncio.wait_for(task, timeout=5)
 
     try:
         out = asyncio.run(scenario())
     finally:
-        nodes.idea_researcher = original_agent
-        nodes._RESEARCH_TIMEOUT = original_timeout
-        nodes.clear_skip()
-        nodes.set_say_sink(None)
+        ideas.idea_researcher = original_agent
+        common.RESEARCH_TIMEOUT = original_timeout
+        progress.clear_skip()
+        progress.set_say_sink(None)
 
     assert agent.cancelled, "skip must cancel the in-flight call"
     research = out["ideas"][0].research
@@ -308,12 +310,12 @@ def test_skip_abandons_in_flight_research():
 
 
 def test_skip_is_rearmed_after_the_phase():
-    nodes.clear_skip()
-    assert not nodes.skip_requested()
-    nodes.request_skip()
-    assert nodes.skip_requested()
-    nodes.clear_skip()
-    assert not nodes.skip_requested(), "otherwise every later phase skips too"
+    progress.clear_skip()
+    assert not progress.skip_requested()
+    progress.request_skip()
+    assert progress.skip_requested()
+    progress.clear_skip()
+    assert not progress.skip_requested(), "otherwise every later phase skips too"
     print("ok: skip re-arms so it does not leak into the next phase")
 
 

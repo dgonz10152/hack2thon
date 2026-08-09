@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent import nodes
+from agent.nodes import build
 from agent.state import BuildPlan, BuildTask
 
 PLAN = BuildPlan(
@@ -82,14 +82,14 @@ def _target() -> Path | None:
 def test_build_crud_app(target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     if not (target / ".git").is_dir():
-        nodes._git(str(target), "init", "-q")
+        build._git(str(target), "init", "-q")
 
     state = {
         "build_plan": PLAN,
         "build_tasks": PLAN.tasks,
         "build_dir": str(target),
     }
-    result = asyncio.run(nodes.build_app_node(state))
+    result = asyncio.run(build.build_app_node(state))
     summary = result["build_result"]
     print(summary, "\n")
 
