@@ -17,3 +17,6 @@ wheels/
 
 # macOS
 .DS_Store
+
+# TUI run checkpoints (SQLite also writes -wal / -shm alongside)
+.runs.db*
