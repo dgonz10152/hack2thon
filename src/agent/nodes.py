@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
 
+import httpx
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.prebuilt import create_react_agent
@@ -36,19 +38,116 @@ from agent.state import (
 )
 from agent.tools import fetch_html, search_web
 
-judge_extractor = model.with_structured_output(Judges)
-judge_researcher = create_react_agent(model, tools=[search_web])
+# Ollama Cloud drops connections mid-response (`httpx.ReadError`, often with an
+# empty message), which used to abort runs already 20+ minutes in. TransportError
+# is the base for ReadError, ConnectError, the timeouts and RemoteProtocolError.
+_TRANSIENT = (httpx.TransportError, ConnectionError, TimeoutError)
 
-idea_generator = model.with_structured_output(IdeaCandidates)
-idea_ranker = model.with_structured_output(IdeaCandidates)
-idea_compiler = model.with_structured_output(FinalIdeas)
-build_planner = model.with_structured_output(BuildPlan)
-deep_researcher = create_react_agent(model, tools=[search_web])
+
+def _resilient(runnable):
+    """Retry a model call on transient network failures.
+
+    Applied to each bound object rather than to `model` itself: wrapping the
+    chat model returns a RunnableRetry, which no longer has
+    `with_structured_output`.
+    """
+    return runnable.with_retry(
+        retry_if_exception_type=_TRANSIENT,
+        stop_after_attempt=int(os.getenv("MODEL_RETRIES", "3")),
+        wait_exponential_jitter=True,
+    )
+
+
+chat = _resilient(model)  # the two direct model.invoke call sites
+judge_extractor = _resilient(model.with_structured_output(Judges))
+judge_researcher = _resilient(create_react_agent(model, tools=[search_web]))
+
+idea_generator = _resilient(model.with_structured_output(IdeaCandidates))
+idea_ranker = _resilient(model.with_structured_output(IdeaCandidates))
+idea_compiler = _resilient(model.with_structured_output(FinalIdeas))
+build_planner = _resilient(model.with_structured_output(BuildPlan))
+deep_researcher = _resilient(create_react_agent(model, tools=[search_web]))
 
 # Provider + permission config for the opencode sub-agents. Passed via
 # OPENCODE_CONFIG because they run with --dir set to the user's build directory,
 # where this repo's project config would not be picked up.
 _OPENCODE_CONFIG = Path(__file__).resolve().parents[2] / "opencode.json"
+
+# Placeholder written when a fan-out worker exhausts its retries. Downstream
+# prompts already handle a missing profile, and this states plainly that nothing
+# was found so the compiler does not treat silence as a finding.
+_UNAVAILABLE = "({kind} unavailable after retries: {err}. No information gathered.)"
+_SKIPPED = "({kind} skipped at the user's request. No information gathered.)"
+
+# LangGraph's default recursion limit is 25 supersteps, roughly a dozen tool
+# calls, which a research agent can legitimately exceed. Raised, but still
+# bounded so a genuinely stuck agent fails instead of running forever.
+_RESEARCH_CONFIG = {"recursion_limit": int(os.getenv("RESEARCH_RECURSION_LIMIT", "40"))}
+
+# Nothing else bounds a model call, so a hung request stalls the phase forever:
+# retries and degradation only fire on errors, never on silence.
+_RESEARCH_TIMEOUT = float(os.getenv("RESEARCH_TIMEOUT", "300"))
+
+# Set from the UI to abandon in-flight research and let the graph move on.
+# A plain flag rather than an asyncio.Event: an Event created at import time
+# binds its internal futures to whichever loop first waits on it, which misfires
+# across loops. A polled flag has no loop affinity.
+_SKIP = False
+
+
+class SkippedByUser(Exception):
+    """Raised in a worker when the user asks to move on."""
+
+
+def request_skip() -> None:
+    """Abandon in-flight research workers. Each degrades and the phase ends."""
+    global _SKIP
+    _SKIP = True
+
+
+def clear_skip() -> None:
+    """Re-arm skipping once the phase has moved on."""
+    global _SKIP
+    _SKIP = False
+
+
+def skip_requested() -> bool:
+    return _SKIP
+
+
+async def _watch_for_skip(poll: float = 0.05) -> None:
+    while not _SKIP:
+        await asyncio.sleep(poll)
+
+
+async def _bounded_research(coro, timeout: float):
+    """Await a research call, but give up on a timeout or a skip request.
+
+    Races the call against a skip watcher so a hung request can be abandoned
+    mid-flight, not merely checked before it starts.
+    """
+    task = asyncio.ensure_future(coro)
+    watcher = asyncio.ensure_future(_watch_for_skip())
+    try:
+        done, _ = await asyncio.wait(
+            {task, watcher}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task in done:
+            return task.result()
+        task.cancel()
+        with contextlib.suppress(BaseException):
+            await task
+        # Decide from the flag, never from which task landed in `done`: a
+        # watcher that errors or is cancelled also lands there, and would then
+        # be misreported as a deliberate skip.
+        if skip_requested():
+            raise SkippedByUser("skipped at your request")
+        raise TimeoutError(f"no response within {timeout:.0f}s")
+    finally:
+        watcher.cancel()
+        with contextlib.suppress(BaseException):
+            await watcher
+
 
 _JUDGE_RESEARCH_SEMAPHORE = asyncio.Semaphore(
     int(os.getenv("JUDGE_RESEARCH_CONCURRENCY", "2"))
@@ -70,7 +169,7 @@ def fetch_html_node(state: AgentState) -> AgentStateUpdate:
 def extract_theme_node(state: AgentState) -> AgentStateUpdate:
     system = SystemMessage(content=THEME_EXTRACTOR_SYSTEM)
     message = HumanMessage(content=state["html"])
-    result = model.invoke([system, message])
+    result = chat.invoke([system, message])
     return {"hackathon_synposis": result.content}
 
 
@@ -98,16 +197,30 @@ async def research_one_judge_node(state: JudgeResearchState) -> AgentStateUpdate
         f"Hackathon synopsis (for context):\n{synopsis}\n\n"
         f"Research this judge and return the 4–8 sentence summary."
     )
-    async with _JUDGE_RESEARCH_SEMAPHORE:
-        result = await judge_researcher.ainvoke(
-            {
-                "messages": [
-                    SystemMessage(content=JUDGE_RESEARCHER_SYSTEM),
-                    HumanMessage(content=user_content),
-                ]
-            }
-        )
-    summary = result["messages"][-1].content
+    try:
+        async with _JUDGE_RESEARCH_SEMAPHORE:
+            result = await _bounded_research(
+                judge_researcher.ainvoke(
+                    {
+                        "messages": [
+                            SystemMessage(content=JUDGE_RESEARCHER_SYSTEM),
+                            HumanMessage(content=user_content),
+                        ]
+                    },
+                    config=_RESEARCH_CONFIG,
+                ),
+                _RESEARCH_TIMEOUT,
+            )
+        summary = result["messages"][-1].content
+    except SkippedByUser:
+        summary = _SKIPPED.format(kind="Judge research")
+        _say(f"  - skipped judge research for {judge.name}")
+    except Exception as exc:
+        # One worker out of N must not lose the whole run. The placeholder is
+        # non-empty on purpose: merge_judges treats "" as "no update", so an
+        # empty string would look like the research simply never happened.
+        summary = _UNAVAILABLE.format(kind="Judge research", err=type(exc).__name__)
+        _say(f"  ! judge research failed for {judge.name}: {exc!r} - continuing")
     enriched = judge.model_copy(update={"online_summary": summary})
     return {"judges": [enriched]}
 
@@ -120,7 +233,7 @@ def compile_bias_node(state: AgentState) -> AgentStateUpdate:
         for j in judges
     )
     user_content = f"Hackathon synopsis:\n{synopsis}\n\n" f"Judge profiles:\n{profiles}"
-    result = model.invoke(
+    result = chat.invoke(
         [
             SystemMessage(content=BIAS_COMPILER_SYSTEM),
             HumanMessage(content=user_content),
@@ -204,16 +317,28 @@ async def research_one_idea_node(state: IdeaResearchState) -> AgentStateUpdate:
         f"Research this idea and return the Feasibility / Existing Projects / "
         f"Winning Formula summary."
     )
-    async with _IDEA_RESEARCH_SEMAPHORE:
-        result = await deep_researcher.ainvoke(
-            {
-                "messages": [
-                    SystemMessage(content=IDEA_RESEARCHER_SYSTEM),
-                    HumanMessage(content=user_content),
-                ]
-            }
-        )
-    summary = result["messages"][-1].content
+    try:
+        async with _IDEA_RESEARCH_SEMAPHORE:
+            result = await _bounded_research(
+                deep_researcher.ainvoke(
+                    {
+                        "messages": [
+                            SystemMessage(content=IDEA_RESEARCHER_SYSTEM),
+                            HumanMessage(content=user_content),
+                        ]
+                    },
+                    config=_RESEARCH_CONFIG,
+                ),
+                _RESEARCH_TIMEOUT,
+            )
+        summary = result["messages"][-1].content
+    except SkippedByUser:
+        summary = _SKIPPED.format(kind="Idea research")
+        _say(f"  - skipped idea research for {idea.title}")
+    except Exception as exc:
+        # Same as judge research: degrade this one idea, keep the other 19.
+        summary = _UNAVAILABLE.format(kind="Idea research", err=type(exc).__name__)
+        _say(f"  ! idea research failed for {idea.title}: {exc!r} - continuing")
     enriched = idea.model_copy(update={"research": summary})
     return {"ideas": [enriched]}
 
@@ -386,13 +511,26 @@ def _task_prompt(
     return "\n\n".join(parts)
 
 
-def _say(message: str) -> None:
-    """Progress output for the build phase.
+_say_sink = None
 
-    The build is the one phase that runs for minutes with nothing to show in
-    state until it finishes, so it streams to the console as it goes.
+
+def set_say_sink(sink) -> None:
+    """Redirect build progress output. The TUI captures it; None restores print."""
+    global _say_sink
+    _say_sink = sink
+
+
+def _say(message: str) -> None:
+    """Progress output for long-running phases.
+
+    The build runs for minutes with nothing in state until it finishes, so it
+    streams as it goes. The research workers also use this to report a degraded
+    worker, which would otherwise be invisible.
     """
-    print(message, flush=True)
+    if _say_sink is None:
+        print(message, flush=True)
+    else:
+        _say_sink(message)
 
 
 def _has_changes(build_dir: str) -> bool:
