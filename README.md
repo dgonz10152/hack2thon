@@ -25,8 +25,7 @@ Built on [LangGraph](https://github.com/langchain-ai/langgraph).
 The research phases use an orchestrator-worker pattern via `Send` to fan out, each gated by an `asyncio.Semaphore` so the Ollama backend doesn't get hammered with concurrent requests.
 
 ```
-fetch_html ─┬─► extract_theme ──────────────────────────────────────┐
-            └─► extract_judges ─► research_one_judge (×N) ─► compile_bias ─► review_bias ─┐
+fetch_html ─► extract_theme ─► extract_judges ─► research_one_judge (×N) ─► compile_bias ─► review_bias ─┐
                                                                                           ▼
   select_idea ◄─ compile_ideas ◄─ research_one_idea (×20) ◄─ rank_ideas ◄─ generate_idea_candidates
        │
@@ -56,8 +55,30 @@ Key env vars:
 - `JUDGE_RESEARCH_CONCURRENCY` - max parallel judge-research agents (default 2; lower if Ollama returns "too many concurrent requests")
 - `BUILD_MODEL` - `provider/model` for the coding sub-agents (default `ollama/minimax-m3`)
 - `BUILD_TASK_TIMEOUT` - seconds a single coding sub-agent may run before it is killed (default 900)
+- `RESEARCH_TIMEOUT` - seconds before a stalled research worker is abandoned (default 300)
+- `MODEL_RETRIES` - attempts per model call on transient network errors (default 3)
 
 ## Run
+
+The TUI runs the whole pipeline start to finish in one process:
+
+```bash
+uv run python -m agent.tui https://your-hackathon.devpost.com
+```
+
+A phase sidebar tracks progress, the right pane streams output as it happens, and the three pauses open as dialogs.
+Press `s` (or click it in the footer) to abandon a research phase that is taking too long: each outstanding judge or idea is marked as skipped and the run moves on.
+Every run is checkpointed to `.runs.db`, so you can quit or crash and pick up where you left off:
+
+```bash
+uv run python -m agent.tui ls              # browse past runs and pick one
+uv run python -m agent.tui --thread <id>   # or resume a known id, shown in the status bar
+```
+
+`ls` lists every run in `.runs.db` newest first, with when it ran, how far it got, whether it is waiting on you, and which page it was for.
+Enter resumes the highlighted run, escape quits.
+
+Or drive the graph directly through LangGraph Studio instead:
 
 ```bash
 uv run langgraph dev
@@ -71,5 +92,10 @@ Final state includes `hackathon_synposis`, enriched `judges`, `judge_bias`, the 
 ## Tests
 
 ```bash
-uv run python tests/test_build_app.py   # build-phase self-check, no model calls or network
+uv run python tests/test_build_app.py       # build-phase self-check, no model calls or network
+uv run python tests/test_tui_driver.py      # TUI driver loop and dialogs, headless
+uv run python tests/test_graph_topology.py  # fan-in nodes run exactly once
+uv run python tests/test_tui_e2e.py         # whole pipeline through the TUI on dummy data
+uv run python tests/test_tools.py            # search failures degrade, not crash
+uv run python tests/test_resilience.py       # retries + degraded workers
 ```
