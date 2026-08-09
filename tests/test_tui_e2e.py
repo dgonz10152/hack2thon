@@ -139,7 +139,7 @@ def install_stubs() -> dict:
         "idea_ranker",
         "idea_compiler",
         "build_planner",
-        "deep_researcher",
+        "idea_researcher",
         "_git",
         "_has_changes",
     ]
@@ -173,7 +173,7 @@ def install_stubs() -> dict:
     nodes.idea_ranker = FakeStructured(
         IdeaCandidates(ideas=[Idea(title=t, pitch=f"pitch {t}") for t in RANKED_TITLES])
     )
-    nodes.deep_researcher = FakeReactAgent("Feasible. No close prior art.")
+    nodes.idea_researcher = FakeReactAgent("Feasible. No close prior art.")
     nodes.idea_compiler = FakeStructured(
         FinalIdeas(
             ideas=[
@@ -424,7 +424,7 @@ def test_completed_phases_maps_state_to_sidebar():
 
     partial = {
         "html": "x",
-        "hackathon_synposis": "s",
+        "hackathon_synopsis": "s",
         "judges": [
             Judge(name="A", blurb="b", online_summary="done"),
             Judge(name="B", blurb="b"),
@@ -606,14 +606,14 @@ def test_skip_button_unsticks_a_hung_research_phase():
     original_db, tui.DB_PATH = tui.DB_PATH, str(tmp / "skip.db")
     SEEN.clear()
     original = install_stubs()
-    original_agent = nodes.deep_researcher
+    original_agent = nodes.idea_researcher
     original_timeout = nodes._RESEARCH_TIMEOUT
-    nodes.deep_researcher = _NeverReturns()
+    nodes.idea_researcher = _NeverReturns()
     nodes._RESEARCH_TIMEOUT = 3600  # long enough that only the key can help
     try:
         stuck_screen, text = asyncio.run(_skip_scenario())
     finally:
-        nodes.deep_researcher = original_agent
+        nodes.idea_researcher = original_agent
         nodes._RESEARCH_TIMEOUT = original_timeout
         nodes.clear_skip()
         restore(original)

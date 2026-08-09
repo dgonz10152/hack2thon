@@ -85,7 +85,7 @@ def test_one_failed_judge_does_not_kill_the_run():
             nodes.research_one_judge_node(
                 {
                     "judge": Judge(name="Ada", blurb="b"),
-                    "hackathon_synposis": "syn",
+                    "hackathon_synopsis": "syn",
                 }
             )
         )
@@ -105,22 +105,22 @@ def test_one_failed_judge_does_not_kill_the_run():
 
 
 def test_one_failed_idea_does_not_kill_the_run():
-    original = nodes.deep_researcher
+    original = nodes.idea_researcher
     said: list[str] = []
     nodes.set_say_sink(said.append)
-    nodes.deep_researcher = _AlwaysFails(httpx.ConnectError("boom"))
+    nodes.idea_researcher = _AlwaysFails(httpx.ConnectError("boom"))
     try:
         out = asyncio.run(
             nodes.research_one_idea_node(
                 {
                     "idea": Idea(title="Idea 1", pitch="p"),
-                    "hackathon_synposis": "syn",
+                    "hackathon_synopsis": "syn",
                     "judge_bias": "bias",
                 }
             )
         )
     finally:
-        nodes.deep_researcher = original
+        nodes.idea_researcher = original
         nodes.set_say_sink(None)
 
     idea = out["ideas"][0]
@@ -166,21 +166,21 @@ class _CapturingAgent:
 
 def test_research_agents_get_a_raised_recursion_limit():
     """25 supersteps is ~12 tool calls, which real research can exceed."""
-    original = nodes.deep_researcher
+    original = nodes.idea_researcher
     agent = _CapturingAgent()
-    nodes.deep_researcher = agent
+    nodes.idea_researcher = agent
     try:
         asyncio.run(
             nodes.research_one_idea_node(
                 {
                     "idea": Idea(title="I", pitch="p"),
-                    "hackathon_synposis": "s",
+                    "hackathon_synopsis": "s",
                     "judge_bias": "b",
                 }
             )
         )
     finally:
-        nodes.deep_researcher = original
+        nodes.idea_researcher = original
 
     assert agent.config, "the research call must pass a config"
     limit = agent.config.get("recursion_limit")
@@ -196,22 +196,22 @@ def test_recursion_error_degrades_rather_than_aborting():
         GraphRecursionError, nodes._TRANSIENT
     ), "a recursion loop is not transient; retrying it would waste three runs"
 
-    original = nodes.deep_researcher
+    original = nodes.idea_researcher
     said: list[str] = []
     nodes.set_say_sink(said.append)
-    nodes.deep_researcher = _AlwaysFails(GraphRecursionError("limit of 25 reached"))
+    nodes.idea_researcher = _AlwaysFails(GraphRecursionError("limit of 25 reached"))
     try:
         out = asyncio.run(
             nodes.research_one_idea_node(
                 {
                     "idea": Idea(title="The Unboxing", pitch="p"),
-                    "hackathon_synposis": "s",
+                    "hackathon_synopsis": "s",
                     "judge_bias": "b",
                 }
             )
         )
     finally:
-        nodes.deep_researcher = original
+        nodes.idea_researcher = original
         nodes.set_say_sink(None)
 
     idea = out["ideas"][0]
@@ -237,10 +237,10 @@ class _Hangs:
 
 def test_a_hung_worker_times_out():
     """Retries and degradation only fire on errors; silence needs a timeout."""
-    original_agent = nodes.deep_researcher
+    original_agent = nodes.idea_researcher
     original_timeout = nodes._RESEARCH_TIMEOUT
     agent = _Hangs()
-    nodes.deep_researcher = agent
+    nodes.idea_researcher = agent
     nodes._RESEARCH_TIMEOUT = 0.3
     said: list[str] = []
     nodes.set_say_sink(said.append)
@@ -249,13 +249,13 @@ def test_a_hung_worker_times_out():
             nodes.research_one_idea_node(
                 {
                     "idea": Idea(title="Stuck", pitch="p"),
-                    "hackathon_synposis": "s",
+                    "hackathon_synopsis": "s",
                     "judge_bias": "b",
                 }
             )
         )
     finally:
-        nodes.deep_researcher = original_agent
+        nodes.idea_researcher = original_agent
         nodes._RESEARCH_TIMEOUT = original_timeout
         nodes.set_say_sink(None)
 
@@ -267,10 +267,10 @@ def test_a_hung_worker_times_out():
 
 def test_skip_abandons_in_flight_research():
     """The `s` binding must interrupt a call already in flight, not just queued."""
-    original_agent = nodes.deep_researcher
+    original_agent = nodes.idea_researcher
     original_timeout = nodes._RESEARCH_TIMEOUT
     agent = _Hangs()
-    nodes.deep_researcher = agent
+    nodes.idea_researcher = agent
     nodes._RESEARCH_TIMEOUT = 3600  # long: only the skip can end this
     said: list[str] = []
     nodes.set_say_sink(said.append)
@@ -280,7 +280,7 @@ def test_skip_abandons_in_flight_research():
             nodes.research_one_idea_node(
                 {
                     "idea": Idea(title="Slow", pitch="p"),
-                    "hackathon_synposis": "s",
+                    "hackathon_synopsis": "s",
                     "judge_bias": "b",
                 }
             )
@@ -292,7 +292,7 @@ def test_skip_abandons_in_flight_research():
     try:
         out = asyncio.run(scenario())
     finally:
-        nodes.deep_researcher = original_agent
+        nodes.idea_researcher = original_agent
         nodes._RESEARCH_TIMEOUT = original_timeout
         nodes.clear_skip()
         nodes.set_say_sink(None)

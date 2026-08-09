@@ -87,7 +87,7 @@ uv run langgraph dev
 Then invoke the graph with a DevPost URL as `devpost_url`.
 
 The run pauses three times for you: to approve the bias analysis, to pick an idea, and to name a build directory.
-Final state includes `hackathon_synposis`, enriched `judges`, `judge_bias`, the 20 `final_ideas`, the `build_plan`, and a `build_result` summarizing which tasks succeeded and where the app was written.
+Final state includes `hackathon_synopsis`, enriched `judges`, `judge_bias`, the 20 `final_ideas`, the `build_plan`, and a `build_result` summarizing which tasks succeeded and where the app was written.
 
 ## Tests
 

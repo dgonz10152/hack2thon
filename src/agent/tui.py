@@ -77,7 +77,7 @@ def completed_phases(values: dict) -> tuple[set[str], dict[str, int]]:
 
     present = {
         "fetch_html": bool(values.get("html")),
-        "extract_theme": bool(values.get("hackathon_synposis")),
+        "extract_theme": bool(values.get("hackathon_synopsis")),
         "extract_judges": bool(judges),
         "research_one_judge": bool(researched_judges),
         "compile_bias": bool(values.get("judge_bias")),

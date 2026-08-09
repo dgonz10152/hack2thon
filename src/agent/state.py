@@ -127,12 +127,12 @@ class InputState(TypedDict):
 
 class JudgeResearchState(TypedDict):
     judge: Judge
-    hackathon_synposis: str
+    hackathon_synopsis: str
 
 
 class IdeaResearchState(TypedDict):
     idea: Idea
-    hackathon_synposis: str
+    hackathon_synopsis: str
     judge_bias: str
 
 
@@ -140,27 +140,10 @@ class AgentState(InputState, total=False):
     messages: Annotated[list, add_messages]
     html: str
     judges: Annotated[list[Judge], merge_judges]
-    hackathon_synposis: str
+    hackathon_synopsis: str
     judge_bias: str
     idea_candidates: list[Idea]
     ideas: Annotated[list[Idea], merge_ideas]
-    final_ideas: list[FinalIdea]
-    selected_idea: str
-    build_plan: BuildPlan
-    build_tasks: list[BuildTask]
-    build_dir: str
-    build_result: str
-
-
-class AgentStateUpdate(TypedDict, total=False):
-    messages: Annotated[list, add_messages]
-    html: str
-    judges: list[Judge]
-    hackathon_synposis: str
-    judge_bias: str
-    devpost_url: str
-    idea_candidates: list[Idea]
-    ideas: list[Idea]
     final_ideas: list[FinalIdea]
     selected_idea: str
     build_plan: BuildPlan
