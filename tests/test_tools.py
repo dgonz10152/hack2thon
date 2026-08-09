@@ -4,7 +4,7 @@ Hermetic - DuckDuckGo is mocked, nothing hits the network.
 
 Regression guard for a real failure: a DNS error inside search_web propagated
 out of the ReAct loop and killed a pipeline that was ~20 minutes in. The tool is
-bound into both judge_researcher and deep_researcher, so every judge and every
+bound into both judge_researcher and idea_researcher, so every judge and every
 idea worker calls it; one transient blip anywhere aborted the whole run.
 
 Run:  uv run python tests/test_tools.py

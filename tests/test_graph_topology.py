@@ -36,7 +36,7 @@ def _stub_nodes(calls: dict, judge_count: int, idea_count: int):
         return fn
 
     nodes.fetch_html_node = record("fetch_html", {"html": "page"})
-    nodes.extract_theme_node = record("extract_theme", {"hackathon_synposis": "SYN"})
+    nodes.extract_theme_node = record("extract_theme", {"hackathon_synopsis": "SYN"})
     nodes.extract_judges_node = record(
         "extract_judges",
         {"judges": [Judge(name=f"J{i}", blurb="b") for i in range(judge_count)]},
@@ -45,7 +45,7 @@ def _stub_nodes(calls: dict, judge_count: int, idea_count: int):
     async def research_one_judge(state):
         calls.setdefault("research_one_judge", []).append(state)
         judge = state["judge"]
-        assert state.get("hackathon_synposis"), (
+        assert state.get("hackathon_synopsis"), (
             "worker received an empty synopsis; extract_theme must run before "
             "the orchestrator that hands the synopsis to each Send"
         )

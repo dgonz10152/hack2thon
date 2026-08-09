@@ -25,7 +25,6 @@ from agent.prompts import (
 )
 from agent.state import (
     AgentState,
-    AgentStateUpdate,
     BuildPlan,
     BuildTask,
     FinalIdea,
@@ -66,7 +65,7 @@ idea_generator = _resilient(model.with_structured_output(IdeaCandidates))
 idea_ranker = _resilient(model.with_structured_output(IdeaCandidates))
 idea_compiler = _resilient(model.with_structured_output(FinalIdeas))
 build_planner = _resilient(model.with_structured_output(BuildPlan))
-deep_researcher = _resilient(create_react_agent(model, tools=[search_web]))
+idea_researcher = _resilient(create_react_agent(model, tools=[search_web]))
 
 # Provider + permission config for the opencode sub-agents. Passed via
 # OPENCODE_CONFIG because they run with --dir set to the user's build directory,
@@ -157,7 +156,7 @@ _IDEA_RESEARCH_SEMAPHORE = asyncio.Semaphore(
 )
 
 
-def fetch_html_node(state: AgentState) -> AgentStateUpdate:
+def fetch_html_node(state: AgentState) -> AgentState:
     html = fetch_html.invoke({"url": state["devpost_url"]})
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
@@ -166,14 +165,14 @@ def fetch_html_node(state: AgentState) -> AgentStateUpdate:
     return {"html": text}
 
 
-def extract_theme_node(state: AgentState) -> AgentStateUpdate:
+def extract_theme_node(state: AgentState) -> AgentState:
     system = SystemMessage(content=THEME_EXTRACTOR_SYSTEM)
     message = HumanMessage(content=state["html"])
     result = chat.invoke([system, message])
-    return {"hackathon_synposis": result.content}
+    return {"hackathon_synopsis": result.content}
 
 
-def extract_judges_node(state: AgentState) -> AgentStateUpdate:
+def extract_judges_node(state: AgentState) -> AgentState:
     system = SystemMessage(content=JUDGE_EXTRACTOR_SYSTEM)
     user = HumanMessage(content=state["html"])
     result: Judges = judge_extractor.invoke([system, user])
@@ -181,16 +180,16 @@ def extract_judges_node(state: AgentState) -> AgentStateUpdate:
 
 
 def research_judges_orchestrator(state: AgentState) -> list[Send]:
-    synopsis = state.get("hackathon_synposis", "")
+    synopsis = state.get("hackathon_synopsis", "")
     return [
-        Send("research_one_judge", {"judge": j, "hackathon_synposis": synopsis})
+        Send("research_one_judge", {"judge": j, "hackathon_synopsis": synopsis})
         for j in state["judges"]
     ]
 
 
-async def research_one_judge_node(state: JudgeResearchState) -> AgentStateUpdate:
+async def research_one_judge_node(state: JudgeResearchState) -> AgentState:
     judge = state["judge"]
-    synopsis = state.get("hackathon_synposis", "")
+    synopsis = state.get("hackathon_synopsis", "")
     user_content = (
         f"Judge name: {judge.name}\n"
         f"Page blurb: {judge.blurb or '(none)'}\n\n"
@@ -225,9 +224,9 @@ async def research_one_judge_node(state: JudgeResearchState) -> AgentStateUpdate
     return {"judges": [enriched]}
 
 
-def compile_bias_node(state: AgentState) -> AgentStateUpdate:
+def compile_bias_node(state: AgentState) -> AgentState:
     judges = state.get("judges", [])
-    synopsis = state.get("hackathon_synposis", "")
+    synopsis = state.get("hackathon_synopsis", "")
     profiles = "\n\n".join(
         f"--- {j.name} ---\nPage blurb: {j.blurb or '(none)'}\nResearch summary: {j.online_summary or '(no research)'}"
         for j in judges
@@ -242,7 +241,7 @@ def compile_bias_node(state: AgentState) -> AgentStateUpdate:
     return {"judge_bias": result.content}
 
 
-def review_bias_node(state: AgentState) -> AgentStateUpdate:
+def review_bias_node(state: AgentState) -> AgentState:
     draft = state.get("judge_bias", "")
     approved = interrupt(
         {
@@ -253,8 +252,8 @@ def review_bias_node(state: AgentState) -> AgentStateUpdate:
     return {"judge_bias": approved}
 
 
-def generate_idea_candidates_node(state: AgentState) -> AgentStateUpdate:
-    synopsis = state.get("hackathon_synposis", "")
+def generate_idea_candidates_node(state: AgentState) -> AgentState:
+    synopsis = state.get("hackathon_synopsis", "")
     bias = state.get("judge_bias", "")
     user_content = (
         f"Hackathon synopsis:\n{synopsis}\n\n"
@@ -270,8 +269,8 @@ def generate_idea_candidates_node(state: AgentState) -> AgentStateUpdate:
     return {"idea_candidates": result.ideas}
 
 
-def rank_ideas_node(state: AgentState) -> AgentStateUpdate:
-    synopsis = state.get("hackathon_synposis", "")
+def rank_ideas_node(state: AgentState) -> AgentState:
+    synopsis = state.get("hackathon_synopsis", "")
     bias = state.get("judge_bias", "")
     candidates = state.get("idea_candidates", [])
     listing = "\n".join(
@@ -294,20 +293,20 @@ def rank_ideas_node(state: AgentState) -> AgentStateUpdate:
 
 
 def research_ideas_orchestrator(state: AgentState) -> list[Send]:
-    synopsis = state.get("hackathon_synposis", "")
+    synopsis = state.get("hackathon_synopsis", "")
     bias = state.get("judge_bias", "")
     return [
         Send(
             "research_one_idea",
-            {"idea": i, "hackathon_synposis": synopsis, "judge_bias": bias},
+            {"idea": i, "hackathon_synopsis": synopsis, "judge_bias": bias},
         )
         for i in state["ideas"]
     ]
 
 
-async def research_one_idea_node(state: IdeaResearchState) -> AgentStateUpdate:
+async def research_one_idea_node(state: IdeaResearchState) -> AgentState:
     idea = state["idea"]
-    synopsis = state.get("hackathon_synposis", "")
+    synopsis = state.get("hackathon_synopsis", "")
     bias = state.get("judge_bias", "")
     user_content = (
         f"Idea title: {idea.title}\n"
@@ -320,7 +319,7 @@ async def research_one_idea_node(state: IdeaResearchState) -> AgentStateUpdate:
     try:
         async with _IDEA_RESEARCH_SEMAPHORE:
             result = await _bounded_research(
-                deep_researcher.ainvoke(
+                idea_researcher.ainvoke(
                     {
                         "messages": [
                             SystemMessage(content=IDEA_RESEARCHER_SYSTEM),
@@ -343,8 +342,8 @@ async def research_one_idea_node(state: IdeaResearchState) -> AgentStateUpdate:
     return {"ideas": [enriched]}
 
 
-def compile_ideas_node(state: AgentState) -> AgentStateUpdate:
-    synopsis = state.get("hackathon_synposis", "")
+def compile_ideas_node(state: AgentState) -> AgentState:
+    synopsis = state.get("hackathon_synopsis", "")
     bias = state.get("judge_bias", "")
     ideas = state.get("ideas", [])
     researched = "\n\n".join(
@@ -365,7 +364,7 @@ def compile_ideas_node(state: AgentState) -> AgentStateUpdate:
     return {"final_ideas": result.ideas}
 
 
-def select_idea_node(state: AgentState) -> AgentStateUpdate:
+def select_idea_node(state: AgentState) -> AgentState:
     ideas = state.get("final_ideas", [])
     options = "\n".join(
         f"{n}. {i.title} — {i.problem}" for n, i in enumerate(ideas, start=1)
@@ -409,9 +408,9 @@ def _resolve_selected_idea(state: AgentState) -> str:
     return selected
 
 
-def plan_build_node(state: AgentState) -> AgentStateUpdate:
+def plan_build_node(state: AgentState) -> AgentState:
     """Master agent: decompose the selected idea into an ordered task list."""
-    synopsis = state.get("hackathon_synposis", "")
+    synopsis = state.get("hackathon_synopsis", "")
     bias = state.get("judge_bias", "")
     idea_description = _resolve_selected_idea(state)
     user_content = (
@@ -435,7 +434,7 @@ def _git(build_dir: str, *args: str) -> subprocess.CompletedProcess:
     )
 
 
-def choose_build_dir_node(state: AgentState) -> AgentStateUpdate:
+def choose_build_dir_node(state: AgentState) -> AgentState:
     """Ask the user where to build, validate it, and git-init it.
 
     Trust boundary: the coding sub-agents get write and shell access to whatever
@@ -580,7 +579,7 @@ async def _run_sub_agent(
     return "ok", output
 
 
-async def build_app_node(state: AgentState) -> AgentStateUpdate:
+async def build_app_node(state: AgentState) -> AgentState:
     """Run one opencode sub-agent per task, in order, in the user's build dir.
 
     Sequential on purpose: task N+1 reads the files task N wrote, so parallel
