@@ -1,4 +1,4 @@
-# multi-agent-research
+# Hack2Thon
 
 A basic multi-agent system that uses AI agents to help you win hackathons end-to-end.
 
