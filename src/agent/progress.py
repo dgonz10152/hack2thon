@@ -1,18 +1,9 @@
 """How long-running phases talk to whoever is watching.
 
-Two small channels between the pipeline and a UI:
-  * `_say` streams progress text (the TUI captures it via `set_say_sink`;
-    without a sink it prints, which is what the bare CLI wants).
+Two small channels between the pipeline and the user:
+  * `_say` prints progress text.
   * the skip flag lets the user abandon in-flight research workers.
 """
-
-_say_sink = None
-
-
-def set_say_sink(sink) -> None:
-    """Redirect progress output. The TUI captures it; None restores print."""
-    global _say_sink
-    _say_sink = sink
 
 
 def _say(message: str) -> None:
@@ -22,10 +13,7 @@ def _say(message: str) -> None:
     streams as it goes. The research workers also use this to report a degraded
     worker, which would otherwise be invisible.
     """
-    if _say_sink is None:
-        print(message, flush=True)
-    else:
-        _say_sink(message)
+    print(message, flush=True)
 
 
 # Set from the UI to abandon in-flight research and let the graph move on.
