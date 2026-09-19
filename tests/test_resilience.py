@@ -12,6 +12,8 @@ Run:  uv run python tests/test_resilience.py
 """
 
 import asyncio
+import io
+from contextlib import redirect_stdout
 
 import httpx
 from langchain_core.runnables import RunnableLambda
@@ -20,6 +22,14 @@ from agent import progress
 from agent.model import TRANSIENT_ERRORS, resilient
 from agent.nodes import common, ideas, judges
 from agent.state import Idea, Judge
+
+
+def run_capturing_output(coro):
+    """Run `coro` and return its result along with everything it printed."""
+    printed = io.StringIO()
+    with redirect_stdout(printed):
+        result = asyncio.run(coro)
+    return result, printed.getvalue()
 
 
 def test_transient_errors_are_retried():
@@ -79,11 +89,9 @@ class _AlwaysFails:
 
 def test_one_failed_judge_does_not_kill_the_run():
     original = judges.judge_researcher
-    said: list[str] = []
-    progress.set_say_sink(said.append)
     judges.judge_researcher = _AlwaysFails(httpx.ReadError(""))
     try:
-        out = asyncio.run(
+        out, said = run_capturing_output(
             judges.research_one_judge_node(
                 {
                     "judge": Judge(name="Ada", blurb="b"),
@@ -93,7 +101,6 @@ def test_one_failed_judge_does_not_kill_the_run():
         )
     finally:
         judges.judge_researcher = original
-        progress.set_say_sink(None)
 
     judge = out["judges"][0]
     assert judge.name == "Ada", out
@@ -102,17 +109,15 @@ def test_one_failed_judge_does_not_kill_the_run():
     assert judge.online_summary, "placeholder must not be empty"
     assert "unavailable" in judge.online_summary.lower(), judge.online_summary
     assert "ReadError" in judge.online_summary, judge.online_summary
-    assert any("Ada" in line for line in said), f"failure must be visible: {said}"
+    assert "Ada" in said, f"failure must be visible: {said}"
     print("ok: a failed judge degrades to a placeholder and is reported")
 
 
 def test_one_failed_idea_does_not_kill_the_run():
     original = ideas.idea_researcher
-    said: list[str] = []
-    progress.set_say_sink(said.append)
     ideas.idea_researcher = _AlwaysFails(httpx.ConnectError("boom"))
     try:
-        out = asyncio.run(
+        out, said = run_capturing_output(
             ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="Idea 1", pitch="p"),
@@ -123,12 +128,11 @@ def test_one_failed_idea_does_not_kill_the_run():
         )
     finally:
         ideas.idea_researcher = original
-        progress.set_say_sink(None)
 
     idea = out["ideas"][0]
     assert idea.title == "Idea 1", out
     assert idea.research and "unavailable" in idea.research.lower(), idea.research
-    assert any("Idea 1" in line for line in said), f"failure must be visible: {said}"
+    assert "Idea 1" in said, f"failure must be visible: {said}"
     print("ok: a failed idea degrades to a placeholder and is reported")
 
 
@@ -199,11 +203,9 @@ def test_recursion_error_degrades_rather_than_aborting():
     ), "a recursion loop is not transient; retrying it would waste three runs"
 
     original = ideas.idea_researcher
-    said: list[str] = []
-    progress.set_say_sink(said.append)
     ideas.idea_researcher = _AlwaysFails(GraphRecursionError("limit of 25 reached"))
     try:
-        out = asyncio.run(
+        out, said = run_capturing_output(
             ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="The Unboxing", pitch="p"),
@@ -214,12 +216,11 @@ def test_recursion_error_degrades_rather_than_aborting():
         )
     finally:
         ideas.idea_researcher = original
-        progress.set_say_sink(None)
 
     idea = out["ideas"][0]
     assert idea.title == "The Unboxing", out
     assert "GraphRecursionError" in idea.research, idea.research
-    assert any("The Unboxing" in line for line in said), said
+    assert "The Unboxing" in said, said
     print("ok: a looping research agent degrades one idea and is reported")
 
 
@@ -244,10 +245,8 @@ def test_a_hung_worker_times_out():
     agent = _Hangs()
     ideas.idea_researcher = agent
     common.RESEARCH_TIMEOUT = 0.3
-    said: list[str] = []
-    progress.set_say_sink(said.append)
     try:
-        out = asyncio.run(
+        out, said = run_capturing_output(
             ideas.research_one_idea_node(
                 {
                     "idea": Idea(title="Stuck", pitch="p"),
@@ -259,23 +258,20 @@ def test_a_hung_worker_times_out():
     finally:
         ideas.idea_researcher = original_agent
         common.RESEARCH_TIMEOUT = original_timeout
-        progress.set_say_sink(None)
 
     assert agent.cancelled, "the hung call must actually be cancelled"
     assert "TimeoutError" in out["ideas"][0].research, out["ideas"][0].research
-    assert any("Stuck" in line for line in said), said
+    assert "Stuck" in said, said
     print("ok: a hung research worker times out, is cancelled, and degrades")
 
 
 def test_skip_abandons_in_flight_research():
-    """The `s` binding must interrupt a call already in flight, not just queued."""
+    """A skip request must interrupt a call already in flight, not just queued."""
     original_agent = ideas.idea_researcher
     original_timeout = common.RESEARCH_TIMEOUT
     agent = _Hangs()
     ideas.idea_researcher = agent
     common.RESEARCH_TIMEOUT = 3600  # long: only the skip can end this
-    said: list[str] = []
-    progress.set_say_sink(said.append)
 
     async def scenario():
         task = asyncio.ensure_future(
@@ -292,12 +288,11 @@ def test_skip_abandons_in_flight_research():
         return await asyncio.wait_for(task, timeout=5)
 
     try:
-        out = asyncio.run(scenario())
+        out, said = run_capturing_output(scenario())
     finally:
         ideas.idea_researcher = original_agent
         common.RESEARCH_TIMEOUT = original_timeout
         progress.clear_skip()
-        progress.set_say_sink(None)
 
     assert agent.cancelled, "skip must cancel the in-flight call"
     research = out["ideas"][0].research
@@ -305,7 +300,7 @@ def test_skip_abandons_in_flight_research():
     assert "unavailable after retries" not in research, (
         "a deliberate skip should read differently from a failure: " + research
     )
-    assert any("skipped" in line for line in said), said
+    assert "skipped" in said, said
     print("ok: skip abandons an in-flight worker and is labelled as a skip")
 
 
