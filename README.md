@@ -60,23 +60,21 @@ Key env vars:
 
 ## Run
 
-The TUI runs the whole pipeline start to finish in one process:
+The CLI runs the whole pipeline start to finish in one process:
 
 ```bash
-uv run python -m agent.tui https://your-hackathon.devpost.com
+uv run python -m agent.cli https://your-hackathon.devpost.com
 ```
 
-A phase sidebar tracks progress, the right pane streams output as it happens, and the three pauses open as dialogs.
-Press `s` (or click it in the footer) to abandon a research phase that is taking too long: each outstanding judge or idea is marked as skipped and the run moves on.
-Every run is checkpointed to `.runs.db`, so you can quit or crash and pick up where you left off:
+It prints each phase as it finishes, streams build output as it happens, and asks the three questions on the terminal.
+Every run is checkpointed to `.runs.db`, so you can quit (Ctrl+C) or crash and pick up where you left off:
 
 ```bash
-uv run python -m agent.tui ls              # browse past runs and pick one
-uv run python -m agent.tui --thread <id>   # or resume a known id, shown in the status bar
+uv run python -m agent.cli ls              # list past runs
+uv run python -m agent.cli --thread <id>   # resume one, id printed at the start of each run
 ```
 
 `ls` lists every run in `.runs.db` newest first, with when it ran, how far it got, whether it is waiting on you, and which page it was for.
-Enter resumes the highlighted run, escape quits.
 
 Or drive the graph directly through LangGraph Studio instead:
 
@@ -93,9 +91,9 @@ Final state includes `hackathon_synopsis`, enriched `judges`, `judge_bias`, the 
 
 ```bash
 uv run python tests/test_build_app.py       # build-phase self-check, no model calls or network
-uv run python tests/test_tui_driver.py      # TUI driver loop and dialogs, headless
+uv run python tests/test_cli_driver.py      # CLI driver loop through repeated interrupts
 uv run python tests/test_graph_topology.py  # fan-in nodes run exactly once
-uv run python tests/test_tui_e2e.py         # whole pipeline through the TUI on dummy data
+uv run python tests/test_cli_e2e.py         # whole pipeline through the CLI on dummy data
 uv run python tests/test_tools.py            # search failures degrade, not crash
 uv run python tests/test_resilience.py       # retries + degraded workers
 ```
