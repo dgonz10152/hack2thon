@@ -20,3 +20,6 @@ wheels/
 
 # TUI run checkpoints (SQLite also writes -wal / -shm alongside)
 .runs.db*
+
+# Judge research notes (RAG vector store)
+.chroma/

@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 import os
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from agent.progress import SkippedByUser, _say, skip_requested
 
@@ -68,8 +68,9 @@ async def bounded_research(coro, timeout: float):
 
 async def run_researcher(
     agent, system_prompt: str, user_content: str, semaphore, kind: str, label: str
-) -> str:
-    """Run one fan-out research worker and return its summary text.
+) -> tuple[str, list[str]]:
+    """Run one fan-out research worker and return its summary text, plus the
+    raw search results it read along the way.
 
     Failure policy, in order: a skip request returns a "skipped" placeholder,
     any other failure (network, recursion limit, timeout) returns an
@@ -90,10 +91,16 @@ async def run_researcher(
                 ),
                 RESEARCH_TIMEOUT,
             )
-        return result["messages"][-1].content
+        messages = result["messages"]
+        snippets = [
+            m.content
+            for m in messages
+            if isinstance(m, ToolMessage) and not m.content.startswith("SEARCH FAILED")
+        ]
+        return messages[-1].content, snippets
     except SkippedByUser:
         _say(f"  - skipped {kind.lower()} for {label}")
-        return SKIPPED.format(kind=kind)
+        return SKIPPED.format(kind=kind), []
     except Exception as exc:
         _say(f"  ! {kind.lower()} failed for {label}: {exc!r} - continuing")
-        return UNAVAILABLE.format(kind=kind, err=type(exc).__name__)
+        return UNAVAILABLE.format(kind=kind, err=type(exc).__name__), []

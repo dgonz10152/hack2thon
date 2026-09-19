@@ -79,7 +79,9 @@ Rules:
 BIAS_COMPILER_SYSTEM = """
 You are analyzing a hackathon judging panel to help a participant tailor
 their submission. You will receive (1) a synopsis of the hackathon and
-(2) short research profiles for each judge on the panel.
+(2) short research profiles for each judge on the panel. Each profile has a
+research summary plus "Retrieved evidence": raw web search snippets about that
+judge, most relevant first.
 
 Produce a bias analysis with exactly these four sections, using these
 headers and nothing else:
@@ -102,6 +104,8 @@ the hackathon synopsis. Call out anything that looks like an implicit
 must-have or must-not.
 
 Rules:
+- Prefer the retrieved evidence as grounding. Ignore snippets that clearly
+  describe a different person with the same name.
 - Ground every claim in the judge profiles or the synopsis. If evidence is
   thin for a section, write "Insufficient signal" under that header rather
   than speculating.

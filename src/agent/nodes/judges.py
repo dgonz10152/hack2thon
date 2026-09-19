@@ -9,11 +9,14 @@ import os
 
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.prebuilt import create_react_agent
 from langgraph.types import Send, interrupt
 
+from agent import rag
 from agent.model import model, resilient
 from agent.nodes.common import run_researcher
+from agent.progress import _say
 from agent.prompts import (
     BIAS_COMPILER_SYSTEM,
     JUDGE_EXTRACTOR_SYSTEM,
@@ -28,6 +31,10 @@ judge_extractor = resilient(model.with_structured_output(Judges))
 judge_researcher = resilient(create_react_agent(model, tools=[search_web]))
 
 _SEMAPHORE = asyncio.Semaphore(int(os.getenv("JUDGE_RESEARCH_CONCURRENCY", "2")))
+
+# Where raw judge research is kept for compile_bias; tests swap in a temp store.
+notes_db = rag.store
+rerank = rag.rerank
 
 
 def fetch_html_node(state: AgentState) -> AgentState:
@@ -62,7 +69,9 @@ def research_judges_orchestrator(state: AgentState) -> list[Send]:
     ]
 
 
-async def research_one_judge_node(state: JudgeResearchState) -> AgentState:
+async def research_one_judge_node(
+    state: JudgeResearchState, config: RunnableConfig
+) -> AgentState:
     judge = state["judge"]
     user_content = (
         f"Judge name: {judge.name}\n"
@@ -70,7 +79,7 @@ async def research_one_judge_node(state: JudgeResearchState) -> AgentState:
         f"Hackathon synopsis (for context):\n{state.get('hackathon_synopsis', '')}\n\n"
         f"Research this judge and return the 4-8 sentence summary."
     )
-    summary = await run_researcher(
+    summary, snippets = await run_researcher(
         judge_researcher,
         JUDGE_RESEARCHER_SYSTEM,
         user_content,
@@ -78,15 +87,39 @@ async def research_one_judge_node(state: JudgeResearchState) -> AgentState:
         kind="Judge research",
         label=judge.name,
     )
+    if snippets:
+        # Losing the notes only costs compile_bias some evidence; the summary
+        # still stands, so a storage failure must not fail the worker.
+        try:
+            thread_id = config["configurable"]["thread_id"]
+            await asyncio.to_thread(
+                rag.save_judge_notes, notes_db(), thread_id, judge.name, snippets
+            )
+        except Exception as exc:
+            _say(f"  ! could not save research notes for {judge.name}: {exc!r}")
     return {"judges": [judge.model_copy(update={"online_summary": summary})]}
 
 
-def compile_bias_node(state: AgentState) -> AgentState:
+def _judge_evidence(thread_id: str, judge) -> str:
+    """The judge's best raw research snippets, as a bullet list."""
+    try:
+        snippets = rag.find_judge_evidence(notes_db(), rerank, thread_id, judge)
+    except Exception as exc:
+        # The summaries alone are what this node used before retrieval existed,
+        # so falling back to them loses nothing; say so loudly, though.
+        _say(f"  ! evidence retrieval failed for {judge.name}: {exc!r}")
+        return "(unavailable)"
+    return "\n".join(f"- {s}" for s in snippets) or "(none)"
+
+
+def compile_bias_node(state: AgentState, config: RunnableConfig) -> AgentState:
     """Fan-in: one panel-wide bias analysis from all the judge profiles."""
+    thread_id = config["configurable"]["thread_id"]
     profiles = "\n\n".join(
         f"--- {j.name} ---\n"
         f"Page blurb: {j.blurb or '(none)'}\n"
-        f"Research summary: {j.online_summary or '(no research)'}"
+        f"Research summary: {j.online_summary or '(no research)'}\n"
+        f"Retrieved evidence:\n{_judge_evidence(thread_id, j)}"
         for j in state.get("judges", [])
     )
     user_content = (
