@@ -96,7 +96,8 @@ def test_one_failed_judge_does_not_kill_the_run():
                 {
                     "judge": Judge(name="Ada", blurb="b"),
                     "hackathon_synopsis": "syn",
-                }
+                },
+                {"configurable": {"thread_id": "resilience"}},
             )
         )
     finally:

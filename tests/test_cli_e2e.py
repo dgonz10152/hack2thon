@@ -16,7 +16,9 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from langchain_core.messages import AIMessage
+from langchain_chroma import Chroma
+from langchain_core.embeddings import DeterministicFakeEmbedding
+from langchain_core.messages import AIMessage, ToolMessage
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
@@ -94,18 +96,23 @@ class FakeStructured:
 
 
 class FakeReactAgent:
-    """Stands in for create_react_agent; nodes read result['messages'][-1]."""
+    """Stands in for create_react_agent; nodes read result['messages'][-1],
+    and the search results in the ToolMessages before it."""
 
-    def __init__(self, text, record_key=None):
+    def __init__(self, text, record_key=None, search_result=None):
         self.text = text
         self.record_key = record_key
+        self.search_result = search_result
 
     async def ainvoke(self, payload, config=None):
         if self.record_key:
             SEEN.setdefault(self.record_key, []).append(
                 str(payload["messages"][-1].content)
             )
-        return {"messages": [AIMessage(content=self.text)]}
+        searches = []
+        if self.search_result:
+            searches = [ToolMessage(content=self.search_result, tool_call_id="s1")]
+        return {"messages": [*searches, AIMessage(content=self.text)]}
 
 
 class FakeStdout:
@@ -142,6 +149,8 @@ def install_stubs() -> dict:
         "chat": judges,
         "judge_extractor": judges,
         "judge_researcher": judges,
+        "notes_db": judges,
+        "rerank": judges,
         "idea_generator": ideas,
         "idea_ranker": ideas,
         "idea_compiler": ideas,
@@ -165,8 +174,18 @@ def install_stubs() -> dict:
         )
     )
     judges.judge_researcher = FakeReactAgent(
-        "Researched profile.", record_key="judge_prompts"
+        "Researched profile.",
+        record_key="judge_prompts",
+        search_result="RAW SNIPPET: judges love agents",
     )
+    # A real Chroma store, but in a temp dir and with fake embeddings, so no
+    # Ollama; the reranker keeps the similarity order, so no model download.
+    notes = Chroma(
+        persist_directory=tempfile.mkdtemp(),
+        embedding_function=DeterministicFakeEmbedding(size=32),
+    )
+    judges.notes_db = lambda: notes
+    judges.rerank = lambda _query, passages: passages
     ideas.idea_generator = FakeStructured(
         IdeaCandidates(
             ideas=[Idea(title=t, pitch=f"pitch {t}") for t in CANDIDATE_TITLES]
@@ -322,6 +341,9 @@ def test_full_pipeline_through_the_cli():
 
     # The bias edit round-tripped through the interrupt.
     assert state["judge_bias"] == "EDITED. BIAS", state["judge_bias"]
+
+    # Raw judge research was stored and retrieved back into the bias prompt.
+    assert "RAW SNIPPET: judges love agents" in SEEN["bias_prompt"], SEEN["bias_prompt"]
 
     # Judge research really ran per judge, and the reducer merged the summaries.
     assert len(state["judges"]) == 2, state["judges"]

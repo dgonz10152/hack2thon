@@ -90,7 +90,7 @@ async def research_one_idea_node(state: IdeaResearchState) -> AgentState:
         f"Research this idea and return the Feasibility / Existing Projects / "
         f"Winning Formula summary."
     )
-    summary = await run_researcher(
+    summary, _snippets = await run_researcher(
         idea_researcher,
         IDEA_RESEARCHER_SYSTEM,
         user_content,
