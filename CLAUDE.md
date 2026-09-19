@@ -15,6 +15,7 @@ All source lives under `src/agent/`:
 - `progress.py` — how the pipeline talks to the user: `_say` for streamed output, and the skip-flag API (`request_skip`/`clear_skip`/`skip_requested`, `SkippedByUser`).
 - `state.py` — `AgentState`, `Judge`/`Judges`/`JudgeResearchState`, and `Idea`/`IdeaCandidates`/`FinalIdea`/`FinalIdeas`/`IdeaResearchState`. The `judges` field uses a `merge_judges` reducer (upsert by name); the `ideas` field uses a `merge_ideas` reducer (upsert by title). Both are required for their fan-outs.
 - `tools.py` — `@tool`-decorated functions (`fetch_html`, `search_web`).
+- `rag.py` - judge research notes: every raw `search_web` result a judge researcher reads is saved to Chroma (`.chroma/`, tagged `thread_id` + `judge`), and `compile_bias` retrieves and FlashRank-reranks the top 5 per judge alongside the summaries.
 - `prompts.py` — system prompts as module constants.
 - `model.py` — `ChatOllama` builder; reads `OLLAMA_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`.
 
@@ -58,6 +59,7 @@ uv run python tests/test_graph_topology.py  # fan-in nodes run exactly once
 uv run python tests/test_cli_e2e.py         # full pipeline through the CLI, model calls stubbed
 uv run python tests/test_tools.py            # search failures degrade, not crash
 uv run python tests/test_resilience.py       # retries + degraded workers
+uv run python tests/test_rag.py              # judge notes: scoping, idempotent saves, rerank
 ```
 
 ## Environment
@@ -71,6 +73,8 @@ uv run python tests/test_resilience.py       # retries + degraded workers
 - `MODEL_RETRIES` — attempts per model call on transient network errors, default 3
 - `RESEARCH_RECURSION_LIMIT` — supersteps a research ReAct agent may take, default 40
 - `RESEARCH_TIMEOUT` — seconds before a single research worker is abandoned, default 300
+- `EMBED_MODEL` - embedding model for judge notes, default `qwen3-embedding:0.6b`
+- `EMBED_BASE_URL` - Ollama serving the embeddings, default local
 - `LANGSMITH_*` — tracing
 
 ## Gotchas
@@ -91,4 +95,5 @@ uv run python tests/test_resilience.py       # retries + degraded workers
 - **A checkpoint written by an older graph can make `aget_state` raise.** Rebuilding a snapshot replays that step's pending writes, so threads from before the `compile_bias` fix still blow up with the original `InvalidUpdateError` and cannot be resumed. `list_threads` catches this per thread and marks the row `unreadable`, so one bad run does not break `ls`; `first_payload` reports it and refuses rather than showing a bogus resume hint.
 - **A coding sub-agent can exit 0 having done nothing.** Observed with `ollama/minimax-m3`, which intermittently returns an empty response and writes no files. `build_app` therefore verifies each task against `git status --porcelain` rather than trusting the exit code, retries once, and fails the build if a task changes nothing twice. Do not "simplify" this to an exit-code check.
 - `opencode.json` at the repo root carries both the `ollama` provider and the `permission` block that lets sub-agents edit and run commands unattended. It is passed to sub-agents via `OPENCODE_CONFIG` because they run with `--dir` pointing at the user's build directory, where this repo's project config would not be discovered.
+- **Judge notes embed via `EMBED_BASE_URL`, not `OLLAMA_BASE_URL`.** The chat model may live on Ollama Cloud, which does not serve the embedding model. Saving or retrieving notes never fails the run: a worker keeps its summary, and `compile_bias` falls back to summaries only, both with a `_say` warning. Note ids are content hashes, so a retried worker overwrites rather than duplicates.
 - `ddgs` is listed as a separate dep alongside `duckduckgo-search`; `langchain-community`'s `DuckDuckGoSearchRun` may pick up either depending on version.
